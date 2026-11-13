@@ -1,0 +1,699 @@
+RideFlow V1 API Contract
+========================
+Version: 1.0.0
+Base URL: /api/v1
+
+1. PROJECT TECHNOLOGY
+----------------------
+- Frontend: React + Vite + JavaScript
+- Backend: FastAPI + Python
+- Database: Supabase PostgreSQL + PostGIS
+- Authentication: Supabase Auth + Google OAuth
+- Realtime: Supabase Realtime
+- Maps: Leaflet + OpenStreetMap
+- Routing: OSRM-compatible routing provider
+
+2. GENERAL API RULES
+---------------------
+- Content type: application/json
+- Authentication header: Bearer <Supabase access token>
+- Timestamp format: ISO 8601 UTC
+- Coordinates: lat = Latitude (-90 to 90); lng = Longitude (-180 to 180)
+- Distance: metres
+- Duration: seconds
+- Fare: Decimal string, for example 750.00
+- Default currency: INR
+- Success response format:
+{
+  "data": "Endpoint-specific response object"
+}
+- Error response format:
+{
+  "error": {
+    "code": "MACHINE_READABLE_CODE",
+    "message": "Human-readable message",
+    "details": {},
+    "request_id": "string"
+  }
+}
+
+3. AUTHENTICATION
+------------------
+- Supabase Auth handles signup, login and Google OAuth; these are not FastAPI endpoints.
+- FastAPI verifies Supabase JWT signature, issuer and expiry.
+- Never trust a user_id supplied by the frontend as identity.
+- Keep service-role keys and database credentials on the backend only.
+
+4. API ENDPOINTS (20)
+--------------------
+
+1. PUT /api/v1/me/profile
+Purpose: Create or update the authenticated user's profile
+Authentication: Authenticated user
+Request:
+JSON body:
+{
+  "full_name": "Rahul Sharma",
+  "phone_number": "9876543210"
+}
+Success response:
+{
+  "data": {
+    "id": "user-uuid-001",
+    "full_name": "Rahul Sharma",
+    "phone_number": "9876543210",
+    "roles": [
+      "passenger"
+    ],
+    "account_status": "active"
+  }
+}
+
+2. GET /api/v1/me
+Purpose: Get the authenticated user's profile and roles
+Authentication: Authenticated user
+Request:
+JSON body: None
+Success response:
+{
+  "data": {
+    "id": "user-uuid-001",
+    "full_name": "Rahul Sharma",
+    "roles": [
+      "passenger"
+    ],
+    "account_status": "active"
+  }
+}
+
+3. POST /api/v1/drivers/me/onboarding
+Purpose: Create driver profile and vehicle
+Authentication: Authenticated user
+Request:
+JSON body:
+{
+  "vehicle": {
+    "vehicle_type": "car",
+    "make_model": "Maruti Swift",
+    "registration_number": "KA01AB1234",
+    "seat_capacity": 4,
+    "wheelchair_accessible": false
+  }
+}
+Success response:
+{
+  "data": {
+    "driver_user_id": "user-uuid-003",
+    "verification_status": "pending",
+    "availability_status": "offline",
+    "vehicle": {
+      "id": "vehicle-uuid-001",
+      "vehicle_type": "car",
+      "seat_capacity": 4
+    }
+  }
+}
+Notes:
+- Backend assigns the driver role. Driver remains offline and pending verification until approved.
+
+4. GET /api/v1/drivers/me
+Purpose: Get current driver's profile
+Authentication: Driver JWT
+Request:
+JSON body: None
+Success response:
+{
+  "data": {
+    "driver_user_id": "user-uuid-003",
+    "verification_status": "verified",
+    "availability_status": "available",
+    "last_seen_at": "2026-11-13T07:00:00Z",
+    "vehicle": {
+      "id": "vehicle-uuid-001",
+      "vehicle_type": "car",
+      "make_model": "Maruti Swift",
+      "seat_capacity": 4
+    }
+  }
+}
+
+5. PATCH /api/v1/drivers/me/availability
+Purpose: Set driver online or offline
+Authentication: Verified driver JWT
+Request:
+JSON body:
+{
+  "availability_status": "available"
+}
+Success response:
+{
+  "data": {
+    "driver_user_id": "user-uuid-003",
+    "availability_status": "available",
+    "updated_at": "2026-11-13T07:05:00Z"
+  }
+}
+Notes:
+- Frontend may request available or offline; backend controls busy status.
+
+6. POST /api/v1/drivers/me/location
+Purpose: Submit driver's current GPS location
+Authentication: Driver JWT
+Request:
+JSON body:
+{
+  "lat": 16.726,
+  "lng": 74.497,
+  "accuracy_m": 12.5,
+  "heading_deg": 180,
+  "speed_mps": 6.2,
+  "recorded_at": "2026-11-13T07:10:00Z"
+}
+Success response:
+{
+  "data": {
+    "driver_user_id": "user-uuid-003",
+    "location_received": true,
+    "received_at": "2026-11-13T07:10:01Z"
+  }
+}
+Notes:
+- Updates the existing latest-location row. Validate coordinates and timestamp.
+
+7. GET /api/v1/drivers/nearby
+Purpose: Find approximate nearby available drivers
+Authentication: Passenger JWT
+Request:
+Query parameters:
+{
+  "lat": 16.726,
+  "lng": 74.497,
+  "radius_m": 5000
+}
+JSON body: None
+Success response:
+{
+  "data": {
+    "available_driver_count": 2,
+    "drivers": [
+      {
+        "marker_id": "marker-001",
+        "approx_location": {
+          "lat": 16.728,
+          "lng": 74.495
+        },
+        "vehicle_type": "car"
+      },
+      {
+        "marker_id": "marker-002",
+        "approx_location": {
+          "lat": 16.72,
+          "lng": 74.5
+        },
+        "vehicle_type": "auto"
+      }
+    ]
+  }
+}
+Notes:
+- Return approximate positions only; do not expose exact driver GPS to unrelated passengers.
+
+8. POST /api/v1/rides/estimate
+Purpose: Calculate road distance, ETA, estimated fare and route geometry
+Authentication: Passenger JWT
+Request:
+JSON body:
+{
+  "pickup": {
+    "lat": 16.726,
+    "lng": 74.497,
+    "address": "Athani Bus Stand"
+  },
+  "destination": {
+    "lat": 16.852,
+    "lng": 74.581,
+    "address": "Belagavi Main Bus Stand"
+  },
+  "vehicle_type": "car"
+}
+Success response:
+{
+  "data": {
+    "distance_m": 52000,
+    "duration_s": 4200,
+    "estimated_fare": "750.00",
+    "currency": "INR",
+    "fare_breakdown": {
+      "base_fare": "50.00",
+      "distance_charge": "650.00",
+      "other_charges": "50.00"
+    },
+    "route": {
+      "type": "LineString",
+      "coordinates": [
+        [
+          74.497,
+          16.726
+        ],
+        [
+          74.53,
+          16.76
+        ],
+        [
+          74.581,
+          16.852
+        ]
+      ]
+    }
+  }
+}
+Notes:
+- Illustrative route and fare only. Backend calls routing provider and calculates fare.
+
+9. POST /api/v1/rides
+Purpose: Create ride and start sequential dispatch
+Authentication: Passenger JWT
+Request:
+JSON body:
+{
+  "client_request_id": "eabf5c20-15ce-49d2-a6b6-5b6d64d4d321",
+  "pickup": {
+    "lat": 16.726,
+    "lng": 74.497,
+    "address": "Athani Bus Stand"
+  },
+  "destination": {
+    "lat": 16.852,
+    "lng": 74.581,
+    "address": "Belagavi Main Bus Stand"
+  },
+  "vehicle_type": "car"
+}
+Success response:
+{
+  "data": {
+    "ride": {
+      "id": "ride-uuid-001",
+      "passenger_id": "user-uuid-001",
+      "status": "requested",
+      "pickup_address": "Athani Bus Stand",
+      "destination_address": "Belagavi Main Bus Stand",
+      "estimated_distance_m": 52000,
+      "estimated_duration_s": 4200,
+      "estimated_fare": "750.00",
+      "currency": "INR"
+    },
+    "dispatch": {
+      "status": "offered",
+      "attempt_number": 1,
+      "current_offer_expires_at": "2026-11-13T07:15:20Z"
+    }
+  }
+}
+Notes:
+- client_request_id makes retries idempotent. Backend recalculates route and fare. Sequential dispatch sends one offer at a time.
+
+10. GET /api/v1/drivers/me/offers
+Purpose: List offers for authenticated driver
+Authentication: Driver JWT
+Request:
+Query parameters:
+{
+  "status": "offered"
+}
+JSON body: None
+Success response:
+{
+  "data": {
+    "offers": [
+      {
+        "offer_id": "offer-uuid-001",
+        "ride_id": "ride-uuid-001",
+        "status": "offered",
+        "offer_number": 1,
+        "pickup": {
+          "address": "Athani Bus Stand",
+          "lat": 16.726,
+          "lng": 74.497
+        },
+        "destination": {
+          "address": "Belagavi Main Bus Stand",
+          "lat": 16.852,
+          "lng": 74.581
+        },
+        "pickup_distance_m": 2000,
+        "pickup_eta_s": 180,
+        "estimated_fare": "750.00",
+        "expires_at": "2026-11-13T07:15:20Z"
+      }
+    ]
+  }
+}
+
+11. POST /api/v1/driver/offers/{offer_id}/accept
+Purpose: Accept a pending ride offer
+Authentication: Driver who owns the offer
+Request:
+Path parameters:
+{
+  "offer_id": "offer-uuid-001"
+}
+JSON body: None
+Success response:
+{
+  "data": {
+    "offer_id": "offer-uuid-001",
+    "ride_id": "ride-uuid-001",
+    "offer_status": "accepted",
+    "ride_status": "accepted",
+    "pickup_eta_s": 180,
+    "accepted_at": "2026-11-13T07:15:10Z"
+  }
+}
+Notes:
+- Use a database transaction. Verify offer is pending, unexpired and driver remains eligible.
+
+12. POST /api/v1/driver/offers/{offer_id}/reject
+Purpose: Reject offer and trigger next sequential offer
+Authentication: Driver who owns the offer
+Request:
+Path parameters:
+{
+  "offer_id": "offer-uuid-001"
+}
+JSON body:
+{
+  "reason": "too_far"
+}
+Success response:
+{
+  "data": {
+    "offer_id": "offer-uuid-001",
+    "offer_status": "rejected",
+    "dispatch_status": "searching",
+    "next_driver_offer_created": true
+  }
+}
+Notes:
+- Allowed reasons: too_far, busy, personal_reason, vehicle_issue, other.
+
+13. GET /api/v1/rides/{ride_id}
+Purpose: Get authorised ride details
+Authentication: Booking passenger, assigned driver or authorised admin
+Request:
+Path parameters:
+{
+  "ride_id": "ride-uuid-001"
+}
+JSON body: None
+Success response:
+{
+  "data": {
+    "id": "ride-uuid-001",
+    "status": "accepted",
+    "pickup": {
+      "lat": 16.726,
+      "lng": 74.497,
+      "address": "Athani Bus Stand"
+    },
+    "destination": {
+      "lat": 16.852,
+      "lng": 74.581,
+      "address": "Belagavi Main Bus Stand"
+    },
+    "estimated_distance_m": 52000,
+    "estimated_duration_s": 4200,
+    "estimated_fare": "750.00",
+    "assigned_driver": {
+      "id": "user-uuid-003",
+      "name": "Amit Kumar",
+      "vehicle_type": "car",
+      "vehicle_model": "Maruti Swift"
+    }
+  }
+}
+
+14. GET /api/v1/me/rides
+Purpose: Get authenticated user's ride history
+Authentication: Passenger or driver JWT
+Request:
+Query parameters:
+{
+  "role": "passenger",
+  "limit": 10,
+  "cursor": null
+}
+JSON body: None
+Success response:
+{
+  "data": {
+    "rides": [
+      {
+        "id": "ride-uuid-001",
+        "status": "completed",
+        "pickup_address": "Athani Bus Stand",
+        "destination_address": "Belagavi Main Bus Stand",
+        "estimated_fare": "750.00",
+        "final_fare": "750.00",
+        "requested_at": "2026-11-13T07:00:00Z",
+        "completed_at": "2026-11-13T08:15:00Z"
+      }
+    ],
+    "pagination": {
+      "next_cursor": null,
+      "has_more": false
+    }
+  }
+}
+Notes:
+- role must be one of the authenticated user's roles.
+
+15. POST /api/v1/driver/rides/{ride_id}/arrived
+Purpose: Mark driver arrived at pickup
+Authentication: Assigned driver JWT
+Request:
+Path parameters:
+{
+  "ride_id": "ride-uuid-001"
+}
+JSON body: None
+Success response:
+{
+  "data": {
+    "ride_id": "ride-uuid-001",
+    "status": "arriving",
+    "arrived_at": "2026-11-13T07:20:00Z"
+  }
+}
+
+16. POST /api/v1/driver/rides/{ride_id}/start
+Purpose: Start the journey
+Authentication: Assigned driver JWT
+Request:
+Path parameters:
+{
+  "ride_id": "ride-uuid-001"
+}
+JSON body: None
+Success response:
+{
+  "data": {
+    "ride_id": "ride-uuid-001",
+    "status": "ongoing",
+    "started_at": "2026-11-13T07:25:00Z"
+  }
+}
+
+17. POST /api/v1/driver/rides/{ride_id}/complete
+Purpose: Complete journey and calculate final fare
+Authentication: Assigned driver JWT
+Request:
+Path parameters:
+{
+  "ride_id": "ride-uuid-001"
+}
+JSON body: None
+Success response:
+{
+  "data": {
+    "ride_id": "ride-uuid-001",
+    "status": "completed",
+    "final_distance_m": 52000,
+    "final_fare": "750.00",
+    "currency": "INR",
+    "completed_at": "2026-11-13T08:15:00Z"
+  }
+}
+Notes:
+- Do not accept final fare from frontend. Backend calculates it.
+
+18. POST /api/v1/rides/{ride_id}/cancel
+Purpose: Passenger cancels ride
+Authentication: Passenger who booked the ride
+Request:
+Path parameters:
+{
+  "ride_id": "ride-uuid-001"
+}
+JSON body:
+{
+  "reason": "changed_my_mind"
+}
+Success response:
+{
+  "data": {
+    "ride_id": "ride-uuid-001",
+    "status": "cancelled",
+    "cancelled_by": "passenger",
+    "cancelled_at": "2026-11-13T07:18:00Z"
+  }
+}
+
+19. POST /api/v1/driver/rides/{ride_id}/cancel
+Purpose: Driver cancels before journey starts and triggers reassignment
+Authentication: Assigned driver JWT
+Request:
+Path parameters:
+{
+  "ride_id": "ride-uuid-001"
+}
+JSON body:
+{
+  "reason": "vehicle_issue"
+}
+Success response:
+{
+  "data": {
+    "ride_id": "ride-uuid-001",
+    "ride_status": "requested",
+    "previous_driver_released": true,
+    "dispatch_status": "searching"
+  }
+}
+Notes:
+- Only reassign before the ride starts. Do not silently reassign an in-progress passenger.
+
+20. GET /api/v1/rides/{ride_id}/events
+Purpose: Get authorised ride event timeline
+Authentication: Booking passenger, assigned driver or authorised admin
+Request:
+Path parameters:
+{
+  "ride_id": "ride-uuid-001"
+}
+JSON body: None
+Success response:
+{
+  "data": {
+    "events": [
+      {
+        "id": "event-uuid-001",
+        "event_type": "ride_requested",
+        "actor_type": "passenger",
+        "from_status": null,
+        "to_status": "requested",
+        "metadata": {},
+        "created_at": "2026-11-13T07:00:00Z"
+      },
+      {
+        "id": "event-uuid-002",
+        "event_type": "driver_rejected",
+        "actor_type": "driver",
+        "from_status": null,
+        "to_status": null,
+        "metadata": {
+          "reason": "too_far"
+        },
+        "created_at": "2026-11-13T07:00:10Z"
+      }
+    ]
+  }
+}
+
+5. COMMON ERROR CODES
+----------------------
+- HTTP 400 | VALIDATION_ERROR: Invalid request fields
+- HTTP 401 | UNAUTHORIZED: Missing or invalid token
+- HTTP 403 | FORBIDDEN: User lacks permission
+- HTTP 404 | NOT_FOUND: Resource not found
+- HTTP 409 | RIDE_STATE_CONFLICT: Invalid state transition or concurrent update
+- HTTP 409 | OFFER_EXPIRED: Driver offer expired
+- HTTP 409 | DRIVER_UNAVAILABLE: Driver is no longer eligible
+- HTTP 429 | RATE_LIMITED: Too many requests
+- HTTP 502 | ROUTING_ERROR: Routing provider failed
+- HTTP 503 | SERVICE_UNAVAILABLE: Required service unavailable
+
+Standard error response structure:
+{
+  "error": {
+    "code": "MACHINE_READABLE_CODE",
+    "message": "Human-readable message",
+    "details": {},
+    "request_id": "string"
+  }
+}
+
+6. SEQUENTIAL DRIVER ALLOCATION
+--------------------------------
+1. Find eligible drivers using verification, availability, fresh GPS and vehicle suitability.
+2. Use PostGIS to shortlist nearby drivers, then road ETA to rank them.
+3. Send an offer to one driver at a time.
+4. Initial offer expiry: 15-20 seconds, configurable.
+5. On rejection or timeout, mark the offer and create the next offer.
+6. Never offer the same ride to the same driver twice.
+7. If all candidates are exhausted, set ride status to no_driver_found.
+8. Use a worker with database locking or atomic conditional updates to process expired offers once.
+
+7. SUPABASE REALTIME COMMUNICATION
+----------------------------------
+Transport: Supabase Realtime Postgres Changes
+Tables used for Realtime:
+- rides
+- ride_offers
+- ride_events
+- driver_locations
+Subscriptions:
+- Driver | Table: ride_offers | Purpose: Receive their own new ride offer
+- Passenger | Table: rides | Purpose: Receive ride status and assignment changes
+- Passenger on active ride | Table: driver_locations | Purpose: Receive assigned driver's permitted live location
+Security: Enable RLS and restrict subscriptions to authorised records. Realtime notifies the UI; FastAPI remains authoritative for business operations.
+
+8. DATABASE TABLES
+-------------------
+- profiles
+- user_roles
+- driver_profiles
+- vehicles
+- driver_locations
+- rides
+- ride_offers
+- ride_events
+
+9. GPS, MAPS AND ROUTING
+------------------------
+- Map display: Leaflet with OpenStreetMap tiles.
+- Routing: OSRM-compatible routing provider; use road distance and road ETA to rank drivers and estimate journeys.
+- GPS updates: Driver browser sends latitude, longitude, accuracy, heading, speed and recorded timestamp to the backend.
+- Store/update the driver's latest location; do not create a new location row for every GPS ping.
+- Use PostGIS to shortlist nearby drivers and routing ETA to rank the shortlist.
+- Expose approximate driver locations to unrelated passengers. Exact assigned-driver location is only for authorised active rides.
+- Browser GPS may not continue reliably when the mobile browser is in the background or the phone is locked. Keep the driver app in the foreground for the V1 demo.
+
+10. IMPORTANT IMPLEMENTATION NOTES
+-----------------------------------
+- POST /rides uses client_request_id as an idempotency key; add a unique constraint on passenger_id and client_request_id.
+- Accept an offer in a database transaction: update offer, ride assignment, driver availability and ride event atomically.
+- Add rejection_reason to ride_offers if storing rejection reason outside event metadata.
+- Driver cancellation before journey starts releases the driver and restarts dispatch; an in-progress ride must not be silently reassigned.
+- Nearby-driver results should expose approximate locations only to unrelated passengers.
+- Browser GPS is not guaranteed while mobile browser is backgrounded or device is locked.
+- Backend calculates estimated and final fares; never trust fare values submitted by frontend.
+- All example UUIDs, coordinates, addresses, fares and timestamps are illustrative.
+
+11. RIDE STATUS FLOW
+--------------------
+requested -> accepted -> arriving -> ongoing -> completed
+Other possible outcomes: cancelled, no_driver_found
+A driver cancellation may restart dispatch only before the journey starts. Never silently reassign an in-progress ride.
+
+END OF CONTRACT
