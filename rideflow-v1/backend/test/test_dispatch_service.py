@@ -1,11 +1,16 @@
 import asyncio
+import json
 from uuid import UUID
 
 from fastapi import HTTPException
+import pytest
 
 from app.schemas.ride import GeoJSONLineString, RoutingResult
 from app.services import dispatch_service
-from app.services.dispatch_service import dispatch_next_driver
+from app.services.dispatch_service import (
+    calculate_match_score,
+    dispatch_next_driver,
+)
 
 
 RIDE_ID = UUID("a8493516-3fd4-4a14-9b0a-a7e5dfac01ab")
@@ -52,11 +57,13 @@ class MockDispatchSession:
         existing_offer=None,
         insert_conflicts=(),
         ride_status="requested",
+        previous_driver=None,
     ):
         self.candidates = list(candidates)
         self.existing_offer = existing_offer
         self.insert_conflicts = set(insert_conflicts)
         self.ride_status = ride_status
+        self.previous_driver = previous_driver
         self.execute_calls = []
         self.offer_inserts = []
         self.events = []
@@ -90,6 +97,14 @@ class MockDispatchSession:
             if params["driver_user_id"] in self.insert_conflicts:
                 return MockResult()
             return MockResult(row={"id": NOW_OFFER_ID})
+        if normalized_sql.startswith("select actor_user_id from public.ride_events"):
+            return MockResult(
+                row=(
+                    {"actor_user_id": self.previous_driver}
+                    if self.previous_driver
+                    else None
+                )
+            )
         if normalized_sql.startswith("update public.rides"):
             return MockResult(row={"id": RIDE_ID})
         if "insert into public.ride_events" in normalized_sql:
@@ -119,21 +134,40 @@ def mock_route_times(monkeypatch, etas):
 
 
 def test_dispatch_filters_candidates_ranks_by_road_eta_and_offers_one(monkeypatch):
-    first = candidate(DRIVER_ONE, 76.64, eta_idle=600)
+    first = candidate(
+        DRIVER_ONE,
+        76.64,
+        eta_idle=600.25,
+        pickup_distance=300.4,
+    )
     second = candidate(DRIVER_TWO, 76.65, eta_idle=30)
     db = MockDispatchSession(candidates=[first, second])
-    calls = mock_route_times(monkeypatch, {76.64: 120, 76.65: 45})
+    calls = mock_route_times(monkeypatch, {76.64: 120.5, 76.65: 45})
 
     result = asyncio.run(dispatch_next_driver(db, RIDE_ID))
 
     assert result.status == "offered"
-    assert result.driver_user_id == DRIVER_TWO
-    assert result.pickup_eta_s == 45
+    assert result.driver_user_id == DRIVER_ONE
+    assert result.pickup_eta_s == 120
     assert len(calls) == 2
     assert len(db.offer_inserts) == 1
-    assert db.offer_inserts[0]["driver_user_id"] == DRIVER_TWO
+    assert db.offer_inserts[0]["driver_user_id"] == DRIVER_ONE
     assert db.offer_inserts[0]["offer_number"] == 1
     assert db.offer_inserts[0]["timeout_seconds"] > 0
+    assert db.offer_inserts[0]["match_score"] == pytest.approx(82.4750833333)
+    factors = json.loads(db.offer_inserts[0]["match_factors"])
+    assert factors["eta_seconds"] == 120.5
+    assert factors["pickup_distance_m"] == 300.4
+    assert factors["idle_seconds"] == 600.25
+    assert factors["eta_score"] == pytest.approx(100 * (1 - 120.5 / 1200))
+    assert factors["distance_score"] == pytest.approx(100 * (1 - 300.4 / 5000))
+    assert factors["idle_score"] == pytest.approx(100 * 600.25 / 1800)
+    assert factors["weights"] == {
+        "eta": 0.60,
+        "distance": 0.25,
+        "idle_time": 0.15,
+    }
+    assert factors["final_score"] == pytest.approx(82.4750833333)
 
     candidate_sql, params = next(
         (sql, params) for sql, params in db.execute_calls if "ST_DWithin" in sql
@@ -143,10 +177,63 @@ def test_dispatch_filters_candidates_ranks_by_road_eta_and_offers_one(monkeypatc
     assert "received_at >= now()" in candidate_sql
     assert "is_active = TRUE" in candidate_sql
     assert "NOT EXISTS" in candidate_sql
+    assert "conflicting_ride.assigned_driver_id = dp.user_id" in candidate_sql
+    assert "conflicting_ride.status IN" in candidate_sql
     assert "LIMIT 10" in candidate_sql
     assert "FOR UPDATE OF dp SKIP LOCKED" in candidate_sql
     assert params["search_radius_m"] > 0
     assert len(db.events) == 1
+
+
+def test_eta_score_normalization():
+    assert calculate_match_score(600, 0, 0)["eta_score"] == pytest.approx(50)
+
+
+def test_distance_score_normalization():
+    assert calculate_match_score(0, 2500, 0)["distance_score"] == pytest.approx(50)
+
+
+def test_idle_time_score_normalization():
+    assert calculate_match_score(0, 0, 900)["idle_score"] == pytest.approx(50)
+
+
+def test_weighted_match_score_uses_configured_component_weights():
+    factors = calculate_match_score(240, 1500, 600)
+
+    assert factors["eta_score"] == pytest.approx(80)
+    assert factors["distance_score"] == pytest.approx(70)
+    assert factors["idle_score"] == pytest.approx(100 * 600 / 1800)
+    assert factors["final_score"] == pytest.approx(70.5)
+
+
+def test_component_and_final_scores_stay_within_zero_to_one_hundred():
+    factors = calculate_match_score(0, 0, 1800)
+    assert factors["eta_score"] == 100
+    assert factors["distance_score"] == 100
+    assert factors["idle_score"] == 100
+    assert factors["final_score"] == 100
+
+    factors = calculate_match_score(1200, 5000, 0)
+    assert factors["eta_score"] == 0
+    assert factors["distance_score"] == 0
+    assert factors["idle_score"] == 0
+    assert factors["final_score"] == 0
+
+
+def test_dispatch_tie_breaking_is_deterministic(monkeypatch):
+    candidates = [
+        candidate(DRIVER_TWO, 76.65, eta_idle=600, pickup_distance=900),
+        candidate(DRIVER_ONE, 76.64, eta_idle=600, pickup_distance=900),
+    ]
+    mock_route_times(monkeypatch, {76.64: 120, 76.65: 120})
+    selected_drivers = []
+
+    for candidate_order in (candidates, list(reversed(candidates))):
+        db = MockDispatchSession(candidates=candidate_order)
+        result = asyncio.run(dispatch_next_driver(db, RIDE_ID))
+        selected_drivers.append(result.driver_user_id)
+
+    assert selected_drivers == [DRIVER_ONE, DRIVER_ONE]
 
 
 def test_dispatch_skips_driver_with_conflicting_active_offer(monkeypatch):
@@ -178,6 +265,26 @@ def test_dispatch_query_excludes_drivers_previously_offered(monkeypatch):
     sql = next(sql for sql, _ in db.execute_calls if "ST_DWithin" in sql)
     assert "previous_offer.driver_user_id = dp.user_id" in sql
     assert result.driver_user_id == DRIVER_TWO
+
+
+def test_dispatch_records_reassignment_after_driver_cancellation(monkeypatch):
+    db = MockDispatchSession(
+        candidates=[candidate(DRIVER_TWO, 76.65)],
+        previous_driver=DRIVER_ONE,
+    )
+    mock_route_times(monkeypatch, {76.65: 40})
+
+    result = asyncio.run(dispatch_next_driver(db, RIDE_ID))
+
+    assert result.driver_user_id == DRIVER_TWO
+    reassignment_event = next(
+        event
+        for event in db.events
+        if event["event_type"] == "driver_reassigned"
+    )
+    assert reassignment_event["metadata"]
+    assert str(DRIVER_ONE) in reassignment_event["metadata"]
+    assert str(DRIVER_TWO) in reassignment_event["metadata"]
 
 
 def test_dispatch_marks_ride_no_driver_found_when_candidates_are_empty():

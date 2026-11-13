@@ -1,0 +1,14 @@
+GEMINI.md
+.venv
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Secrets
+.env
+.env.*
+!.env.example
+**/simulation_data/

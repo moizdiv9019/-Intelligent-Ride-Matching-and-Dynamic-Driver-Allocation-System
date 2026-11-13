@@ -1,5 +1,6 @@
 import json
 from dataclasses import dataclass
+from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
@@ -18,6 +19,59 @@ class DispatchResult:
     offer_id: UUID | None = None
     driver_user_id: UUID | None = None
     pickup_eta_s: int | None = None
+
+
+def calculate_match_score(
+    eta_seconds: float,
+    pickup_distance_m: float,
+    idle_seconds: float,
+) -> dict[str, Any]:
+    eta_score = max(
+        0.0,
+        min(
+            100.0,
+            100.0
+            * (1.0 - eta_seconds / settings.matching_eta_max_seconds),
+        ),
+    )
+    distance_score = max(
+        0.0,
+        min(
+            100.0,
+            100.0
+            * (
+                1.0
+                - pickup_distance_m / settings.matching_distance_max_meters
+            ),
+        ),
+    )
+    idle_score = max(
+        0.0,
+        min(
+            100.0,
+            100.0 * idle_seconds / settings.matching_idle_max_seconds,
+        ),
+    )
+    weights = {
+        "eta": settings.matching_eta_weight,
+        "distance": settings.matching_distance_weight,
+        "idle_time": settings.matching_idle_time_weight,
+    }
+    final_score = (
+        eta_score * weights["eta"]
+        + distance_score * weights["distance"]
+        + idle_score * weights["idle_time"]
+    )
+    return {
+        "eta_seconds": eta_seconds,
+        "pickup_distance_m": pickup_distance_m,
+        "idle_seconds": idle_seconds,
+        "eta_score": eta_score,
+        "distance_score": distance_score,
+        "idle_score": idle_score,
+        "weights": weights,
+        "final_score": final_score,
+    }
 
 
 def _mark_no_driver_found(db: Session, ride_id: UUID) -> DispatchResult:
@@ -139,7 +193,15 @@ async def dispatch_next_driver(db: Session, ride_id: UUID) -> DispatchResult:
                     WHERE active_offer.driver_user_id = dp.user_id
                       AND active_offer.status = 'offered'
               )
-            ORDER BY pickup_distance_m ASC
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM public.rides AS conflicting_ride
+                    WHERE conflicting_ride.assigned_driver_id = dp.user_id
+                      AND conflicting_ride.status IN (
+                            'accepted', 'arriving', 'ongoing'
+                      )
+              )
+            ORDER BY pickup_distance_m ASC, dp.user_id ASC
             LIMIT 10
             FOR UPDATE OF dp SKIP LOCKED
             """
@@ -173,15 +235,34 @@ async def dispatch_next_driver(db: Session, ride_id: UUID) -> DispatchResult:
                 continue
             raise
 
+        eta_seconds = float(route.duration_s)
+        pickup_distance_m = float(candidate["pickup_distance_m"])
+        idle_seconds = float(candidate["idle_seconds"] or 0)
+        match_factors = calculate_match_score(
+            eta_seconds,
+            pickup_distance_m,
+            idle_seconds,
+        )
         ranked_candidates.append(
             (
-                route.duration_s,
-                -float(candidate["idle_seconds"] or 0),
+                match_factors["final_score"],
+                eta_seconds,
+                pickup_distance_m,
+                idle_seconds,
                 candidate,
+                match_factors,
             )
         )
 
-    ranked_candidates.sort(key=lambda result: (result[0], result[1]))
+    ranked_candidates.sort(
+        key=lambda result: (
+            -result[0],
+            result[1],
+            result[2],
+            -result[3],
+            str(result[4]["driver_user_id"]),
+        )
+    )
     if not ranked_candidates:
         if routing_unavailable:
             return DispatchResult(status="pending")
@@ -198,17 +279,16 @@ async def dispatch_next_driver(db: Session, ride_id: UUID) -> DispatchResult:
         {"ride_id": ride_id},
     ).scalar_one()
 
-    for eta_seconds, _, candidate in ranked_candidates:
-        pickup_distance_m = int(round(float(candidate["pickup_distance_m"])))
+    for (
+        match_score,
+        eta_seconds,
+        pickup_distance_m_raw,
+        _,
+        candidate,
+        match_factors,
+    ) in ranked_candidates:
+        pickup_distance_m = int(round(pickup_distance_m_raw))
         pickup_eta_s = int(round(eta_seconds))
-        match_score = max(0.0, min(100.0, 100.0 - pickup_eta_s / 60.0))
-        match_factors = json.dumps(
-            {
-                "road_eta_seconds": pickup_eta_s,
-                "idle_seconds": float(candidate["idle_seconds"] or 0),
-                "pickup_distance_m": pickup_distance_m,
-            }
-        )
         offer = db.execute(
             text(
                 """
@@ -234,13 +314,26 @@ async def dispatch_next_driver(db: Session, ride_id: UUID) -> DispatchResult:
                 "pickup_distance_m": pickup_distance_m,
                 "pickup_eta_s": pickup_eta_s,
                 "match_score": match_score,
-                "match_factors": match_factors,
+                "match_factors": json.dumps(match_factors),
                 "timeout_seconds": settings.offer_timeout_seconds,
             },
         ).mappings().first()
         if offer is None:
             continue
 
+        previous_driver_cancellation = db.execute(
+            text(
+                """
+                SELECT actor_user_id
+                FROM public.ride_events
+                WHERE ride_id = :ride_id
+                  AND event_type = 'ride_cancelled_by_driver'
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """
+            ),
+            {"ride_id": ride_id},
+        ).mappings().first()
         record_ride_event(
             db,
             ride_id=ride_id,
@@ -254,6 +347,27 @@ async def dispatch_next_driver(db: Session, ride_id: UUID) -> DispatchResult:
                 "driver_user_id": str(candidate["driver_user_id"]),
             },
         )
+        if (
+            previous_driver_cancellation is not None
+            and previous_driver_cancellation["actor_user_id"]
+            != candidate["driver_user_id"]
+        ):
+            record_ride_event(
+                db,
+                ride_id=ride_id,
+                actor_user_id=None,
+                actor_type="system",
+                event_type="driver_reassigned",
+                from_status="requested",
+                to_status="requested",
+                metadata={
+                    "previous_driver_id": str(
+                        previous_driver_cancellation["actor_user_id"]
+                    ),
+                    "new_driver_id": str(candidate["driver_user_id"]),
+                    "offer_id": str(offer["id"]),
+                },
+            )
         return DispatchResult(
             status="offered",
             offer_id=offer["id"],

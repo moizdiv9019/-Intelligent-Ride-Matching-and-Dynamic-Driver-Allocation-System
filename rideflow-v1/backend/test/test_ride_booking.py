@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
 import pytest
@@ -37,8 +37,8 @@ class MockResult:
         return self
 
 
-def ride_row():
-    return {
+def ride_row(**overrides):
+    row = {
         "ride_id": RIDE_ID,
         "status": "requested",
         "pickup_lat": 12.2958,
@@ -50,6 +50,8 @@ def ride_row():
         "estimated_distance_m": 2501,
         "estimated_duration_s": 300,
         "estimated_fare": 59.0,
+        "final_distance_m": None,
+        "final_fare": None,
         "currency": "INR",
         "fare_breakdown": {
             "base_fare": 30.0,
@@ -74,6 +76,8 @@ def ride_row():
         "cancelled_at": None,
         "dispatch_status": "offered",
     }
+    row.update(overrides)
+    return row
 
 
 class MockRideSession:
@@ -84,11 +88,13 @@ class MockRideSession:
         existing_id=None,
         inserted=True,
         authorized=True,
+        detail=None,
     ):
         self.roles = list(roles)
         self.existing_id = existing_id
         self.inserted = inserted
         self.authorized = authorized
+        self.detail = detail or ride_row()
         self.execute_calls = []
         self.commit_count = 0
         self.rollback_count = 0
@@ -115,7 +121,7 @@ class MockRideSession:
         if "insert into public.ride_events" in normalized_sql:
             return MockResult()
         if "from public.rides as ride" in normalized_sql:
-            return MockResult(row=ride_row() if self.authorized else None)
+            return MockResult(row=self.detail if self.authorized else None)
         raise AssertionError(f"Unexpected SQL statement: {sql}")
 
     def commit(self):
@@ -290,3 +296,83 @@ def test_unrelated_user_cannot_retrieve_ride(monkeypatch):
     assert "ride.passenger_id = :requester_id" in query[0]
     assert "ride.assigned_driver_id = :requester_id" in query[0]
     assert query[1]["requester_id"] == PASSENGER_ID
+
+
+def test_completed_ride_detail_includes_final_values_and_stored_fare_breakdown(
+    monkeypatch,
+):
+    completed_at = NOW
+    final_breakdown = {
+        "base_fare": 30.0,
+        "distance_fare": 50.4,
+        "time_fare": 5.5,
+        "minimum_fare_adjustment": 0.0,
+        "estimated_total": 85.9,
+        "currency": "INR",
+    }
+    db = MockRideSession(
+        detail=ride_row(
+            status="completed",
+            estimated_distance_m=2501,
+            estimated_fare=59.0,
+            final_distance_m=2501,
+            final_fare=85.9,
+            fare_breakdown=final_breakdown,
+            accepted_at=NOW - timedelta(minutes=10),
+            arrived_at=NOW - timedelta(minutes=8),
+            started_at=NOW - timedelta(minutes=5),
+            completed_at=completed_at,
+        )
+    )
+    client = build_client(monkeypatch, db)
+
+    response = client.get(f"/api/v1/rides/{RIDE_ID}")
+
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail["estimated_distance_m"] == 2501
+    assert detail["estimated_fare"] == 59.0
+    assert detail["final_distance_m"] == 2501
+    assert detail["final_fare"] == 85.9
+    assert detail["fare_breakdown"] == final_breakdown
+    assert detail["requested_at"] == NOW.isoformat().replace("+00:00", "Z")
+    assert detail["accepted_at"] is not None
+    assert detail["arrived_at"] is not None
+    assert detail["started_at"] is not None
+    assert detail["completed_at"] == completed_at.isoformat().replace("+00:00", "Z")
+    assert detail["cancelled_at"] is None
+
+    query = next(
+        sql for sql, _ in db.execute_calls if "FROM public.rides AS ride" in sql
+    )
+    assert "ride.final_distance_m" in query
+    assert "ride.final_fare" in query
+
+
+def test_non_completed_ride_detail_keeps_final_values_null(monkeypatch):
+    db = MockRideSession(
+        detail=ride_row(
+            status="accepted",
+            final_distance_m=None,
+            final_fare=None,
+            accepted_at=NOW,
+        )
+    )
+    client = build_client(monkeypatch, db)
+
+    response = client.get(f"/api/v1/rides/{RIDE_ID}")
+
+    assert response.status_code == 200
+    detail = response.json()
+    assert detail["status"] == "accepted"
+    assert detail["estimated_distance_m"] == 2501
+    assert detail["estimated_fare"] == 59.0
+    assert detail["final_distance_m"] is None
+    assert detail["final_fare"] is None
+    assert detail["fare_breakdown"]["estimated_total"] == 65.0
+    assert detail["requested_at"] is not None
+    assert detail["accepted_at"] == NOW.isoformat().replace("+00:00", "Z")
+    assert detail["arrived_at"] is None
+    assert detail["started_at"] is None
+    assert detail["completed_at"] is None
+    assert detail["cancelled_at"] is None

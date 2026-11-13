@@ -61,6 +61,8 @@ def _read_ride(
                 ride.estimated_distance_m,
                 ride.estimated_duration_s,
                 ride.estimated_fare,
+                ride.final_distance_m,
+                ride.final_fare,
                 ride.currency,
                 ride.fare_breakdown,
                 ST_AsGeoJSON(ride.route_geom)::jsonb AS route_geometry,
@@ -114,6 +116,8 @@ def _read_ride(
         estimated_distance_m=row["estimated_distance_m"],
         estimated_duration_s=row["estimated_duration_s"],
         estimated_fare=row["estimated_fare"],
+        final_distance_m=row["final_distance_m"],
+        final_fare=row["final_fare"],
         currency=row["currency"],
         fare_breakdown=row["fare_breakdown"] or {},
         route_geometry=(

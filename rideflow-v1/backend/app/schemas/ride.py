@@ -97,6 +97,8 @@ class RideDetailsResponse(BaseModel):
     estimated_distance_m: int | None
     estimated_duration_s: int | None
     estimated_fare: float | None
+    final_distance_m: int | None
+    final_fare: float | None
     currency: str
     fare_breakdown: dict[str, Any]
     route_geometry: GeoJSONLineString | None
@@ -109,6 +111,58 @@ class RideDetailsResponse(BaseModel):
     completed_at: datetime | None
     cancelled_at: datetime | None
     dispatch_status: str
+
+
+class RideCancellationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class RideLifecycleResponse(BaseModel):
+    ride_id: UUID
+    status: RideStatus
+    assigned_driver_id: UUID | None = None
+    assigned_vehicle_id: UUID | None = None
+    arrived_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    final_distance_m: int | None = None
+    final_fare: float | None = None
+    fare_breakdown: dict[str, Any] | None = None
+    dispatch_status: str | None = None
+
+
+class RideHistoryItem(BaseModel):
+    ride_id: UUID
+    status: RideStatus
+    pickup_address: str
+    destination_address: str
+    estimated_fare: float | None
+    final_fare: float | None
+    created_at: datetime
+    requested_at: datetime | None
+    accepted_at: datetime | None
+    arrived_at: datetime | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    cancelled_at: datetime | None
+
+
+class RideHistoryResponse(BaseModel):
+    items: list[RideHistoryItem]
+    next_cursor: str | None
+
+
+class RideEventResponse(BaseModel):
+    event_id: UUID
+    event_type: str
+    actor_type: str
+    created_at: datetime
+    from_status: str | None
+    to_status: str | None
+    metadata: dict[str, Any]
 
 
 class DriverOfferResponse(BaseModel):
