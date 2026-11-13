@@ -259,7 +259,7 @@ def accept_offer(
                 """
             ),
             {"driver_user_id": current_user.id},
-        ).first()
+        ).mappings().first()
         if vehicle is None:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

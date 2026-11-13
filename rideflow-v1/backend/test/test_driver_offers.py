@@ -16,16 +16,22 @@ OFFER_ID = UUID("8f8e9d26-eef8-4ef9-b567-cbc5ab05d9e5")
 RIDE_ID = UUID("a8493516-3fd4-4a14-9b0a-a7e5dfac01ab")
 VEHICLE_ID = UUID("9f8e9d26-eef8-4ef9-b567-cbc5ab05d9e6")
 NOW = datetime(2026, 11, 13, 12, 0, tzinfo=timezone.utc)
+_UNSET = object()
 
 
 class MockResult:
-    def __init__(self, *, row=None, rows=(), values=()):
+    def __init__(self, *, row=None, mapping_row=_UNSET, rows=(), values=()):
         self.row = row
+        self.mapping_row = row if mapping_row is _UNSET else mapping_row
         self.rows = list(rows)
         self.values = list(values)
 
     def mappings(self):
-        return self
+        return MockResult(
+            row=self.mapping_row,
+            rows=self.rows,
+            values=self.values,
+        )
 
     def first(self):
         return self.row
@@ -46,6 +52,8 @@ class MockSession:
         offer_status="offered",
         expired=False,
         active_ride=False,
+        driver_exists=True,
+        vehicle_exists=True,
         offers=(),
     ):
         self.roles = list(roles)
@@ -53,6 +61,8 @@ class MockSession:
         self.offer_status = offer_status
         self.expired = expired
         self.active_ride = active_ride
+        self.driver_exists = driver_exists
+        self.vehicle_exists = vehicle_exists
         self.offers = list(offers)
         self.execute_calls = []
         self.events = []
@@ -97,6 +107,8 @@ class MockSession:
                 }
             )
         if normalized_sql.startswith("select verification_status, availability_status"):
+            if not self.driver_exists:
+                return MockResult()
             return MockResult(
                 row={
                     "verification_status": "verified",
@@ -106,7 +118,12 @@ class MockSession:
         if "id <> :ride_id" in normalized_sql and "assigned_driver_id" in normalized_sql:
             return MockResult(row={"id": UUID(int=1)} if self.active_ride else None)
         if normalized_sql.startswith("select id from public.vehicles"):
-            return MockResult(row={"id": VEHICLE_ID})
+            if not self.vehicle_exists:
+                return MockResult()
+            return MockResult(
+                row=(VEHICLE_ID,),
+                mapping_row={"id": VEHICLE_ID},
+            )
         if normalized_sql.startswith("update public.ride_offers"):
             if "set status = 'expired'" in normalized_sql:
                 return MockResult(row={"id": OFFER_ID})
@@ -199,11 +216,58 @@ def test_driver_can_accept_owned_offer(monkeypatch):
         "dispatch_status": None,
     }
     sql_statements = [sql.lower() for sql, _ in db.execute_calls]
-    assert any("set status = 'accepted'" in sql for sql in sql_statements)
-    assert any("assigned_driver_id = :driver_user_id" in sql for sql in sql_statements)
-    assert any("availability_status = 'busy'" in sql for sql in sql_statements)
+    offer_acceptance = next(
+        sql.lower()
+        for sql, _ in db.execute_calls
+        if sql.lower().startswith("update public.ride_offers")
+        and "set status = 'accepted'" in sql.lower()
+    )
+    assert "set status = 'accepted'" in offer_acceptance
+    ride_assignment = next(
+        (sql.lower(), params)
+        for sql, params in db.execute_calls
+        if sql.lower().startswith("update public.rides")
+    )
+    assert "assigned_driver_id = :driver_user_id" in ride_assignment[0]
+    assert "assigned_vehicle_id = :vehicle_id" in ride_assignment[0]
+    assert "status = 'accepted'" in ride_assignment[0]
+    assert ride_assignment[1]["driver_user_id"] == DRIVER_ID
+    assert ride_assignment[1]["vehicle_id"] == VEHICLE_ID
+    assert any(
+        sql.startswith("update public.driver_profiles")
+        and "availability_status = 'busy'" in sql
+        for sql in sql_statements
+    )
     assert db.events[0]["event_type"] == "driver_offer_accepted"
+    assert db.events[0]["ride_id"] == RIDE_ID
+    assert db.events[0]["actor_user_id"] == DRIVER_ID
+    assert db.events[0]["to_status"] == "accepted"
     assert db.commit_count == 1
+    assert db.rollback_count == 0
+
+
+def test_acceptance_returns_conflict_when_driver_profile_is_missing(monkeypatch):
+    db = MockSession(driver_exists=False)
+    client = build_client(monkeypatch, db)
+
+    response = client.post(f"/api/v1/driver/offers/{OFFER_ID}/accept")
+
+    assert response.status_code == 409
+    assert db.commit_count == 0
+    assert db.rollback_count == 1
+    assert not db.events
+
+
+def test_acceptance_returns_conflict_when_active_vehicle_is_missing(monkeypatch):
+    db = MockSession(vehicle_exists=False)
+    client = build_client(monkeypatch, db)
+
+    response = client.post(f"/api/v1/driver/offers/{OFFER_ID}/accept")
+
+    assert response.status_code == 409
+    assert db.commit_count == 0
+    assert db.rollback_count == 1
+    assert not db.events
 
 
 def test_offer_cannot_be_accepted_by_another_driver(monkeypatch):
