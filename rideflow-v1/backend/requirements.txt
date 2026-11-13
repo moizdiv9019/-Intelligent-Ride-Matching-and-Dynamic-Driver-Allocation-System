@@ -5,4 +5,5 @@ psycopg[binary]
 pydantic-settings
 supabase
 httpx
+scikit-learn
 pytest

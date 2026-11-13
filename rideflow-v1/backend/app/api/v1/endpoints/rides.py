@@ -193,6 +193,7 @@ async def create_ride(
                     passenger_id, client_request_id, status,
                     pickup_location, pickup_address,
                     destination_location, destination_address,
+                    pooling_opt_in,
                     estimated_distance_m, estimated_duration_s,
                     estimated_fare, currency, fare_breakdown, route_geom,
                     requested_at, created_at, updated_at
@@ -205,6 +206,7 @@ async def create_ride(
                         ST_MakePoint(:destination_lng, :destination_lat), 4326
                     )::geography,
                     :destination_address,
+                    :pooling_opt_in,
                     :estimated_distance_m, :estimated_duration_s,
                     :estimated_fare, 'INR',
                     CAST(:fare_breakdown AS JSONB),
@@ -228,6 +230,7 @@ async def create_ride(
                 "destination_lat": request.destination.lat,
                 "destination_lng": request.destination.lng,
                 "destination_address": request.destination_address,
+                "pooling_opt_in": request.pooling_opt_in,
                 "estimated_distance_m": int(round(route.distance_m)),
                 "estimated_duration_s": int(round(route.duration_s)),
                 "estimated_fare": fare.estimated_total,

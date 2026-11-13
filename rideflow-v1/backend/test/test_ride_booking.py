@@ -203,11 +203,44 @@ def test_successful_booking_calculates_route_and_dispatches_once(monkeypatch):
     assert params["pickup_lat"] == 12.2958
     assert params["estimated_distance_m"] == 2500
     assert params["estimated_duration_s"] == 300
+    assert "pooling_opt_in" in insert_sql
+    assert params["pooling_opt_in"] is False
     assert db.commit_count == 1
     assert any(
         params.get("event_type") == "ride_requested"
         for _, params in db.execute_calls
     )
+
+
+def test_ride_booking_accepts_pooling_opt_in_without_changing_individual_fare(
+    monkeypatch,
+):
+    db = MockRideSession()
+    client = build_client(monkeypatch, db)
+
+    async def route_service(pickup, destination):
+        return fake_route()
+
+    async def dispatch_service(session, ride_id):
+        return DispatchResult(status="offered")
+
+    monkeypatch.setattr(rides, "get_driving_route", route_service)
+    monkeypatch.setattr(rides, "dispatch_next_driver", dispatch_service)
+
+    response = client.post(
+        "/api/v1/rides",
+        json=booking_payload(pooling_opt_in=True),
+    )
+
+    assert response.status_code == 201
+    assert response.json()["estimated_fare"] == 59.0
+    insert_sql, params = next(
+        (sql, params)
+        for sql, params in db.execute_calls
+        if sql.startswith("INSERT INTO public.rides")
+    )
+    assert "pooling_opt_in" in insert_sql
+    assert params["pooling_opt_in"] is True
 
 
 def test_duplicate_idempotency_key_returns_existing_ride_without_dispatch(

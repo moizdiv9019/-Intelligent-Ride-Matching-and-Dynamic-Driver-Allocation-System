@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
 from math import isfinite
+from typing import Literal
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -25,15 +26,26 @@ class ZoneCell:
 
 
 @dataclass(frozen=True)
+class ZoneBounds:
+    min_lat: float
+    max_lat: float
+    min_lng: float
+    max_lng: float
+
+
+ZoneStatus = Literal["shortage", "balanced", "surplus", "inactive"]
+
+
+@dataclass(frozen=True)
 class ZoneSummary:
     zone_id: str
     center_lat: float
     center_lng: float
-    bounds: dict[str, float]
+    bounds: ZoneBounds
     recent_demand_count: int
     available_driver_count: int
     demand_supply_ratio: float | None
-    zone_status: str
+    zone_status: ZoneStatus
     analysis_timestamp: datetime
 
 
@@ -66,6 +78,19 @@ def _zone_from_indexes(
         min_lng=float(decimal_min_lng),
         max_lng=float(decimal_max_lng),
     )
+
+
+def get_zone_for_grid_indices(
+    lat_index: int,
+    lng_index: int,
+    resolution: float | None = None,
+) -> ZoneCell:
+    grid_resolution = (
+        settings.zone_grid_resolution_degrees if resolution is None else resolution
+    )
+    if not isfinite(grid_resolution) or grid_resolution <= 0:
+        raise ValueError("Grid resolution must be a positive finite number.")
+    return _zone_from_indexes(lat_index, lng_index, grid_resolution)
 
 
 def get_zone_for_coordinates(
@@ -205,7 +230,7 @@ def classify_zone(
     *,
     shortage_threshold: float | None = None,
     surplus_threshold: float | None = None,
-) -> tuple[float | None, str]:
+) -> tuple[float | None, ZoneStatus]:
     if demand_count < 0 or driver_count < 0:
         raise ValueError("Demand and driver counts cannot be negative.")
     shortage_limit = (
@@ -267,12 +292,12 @@ def generate_zone_summary(
                 zone_id=cell.zone_id,
                 center_lat=cell.center_lat,
                 center_lng=cell.center_lng,
-                bounds={
-                    "min_lat": cell.min_lat,
-                    "max_lat": cell.max_lat,
-                    "min_lng": cell.min_lng,
-                    "max_lng": cell.max_lng,
-                },
+                bounds=ZoneBounds(
+                    min_lat=cell.min_lat,
+                    max_lat=cell.max_lat,
+                    min_lng=cell.min_lng,
+                    max_lng=cell.max_lng,
+                ),
                 recent_demand_count=demand_count,
                 available_driver_count=driver_count,
                 demand_supply_ratio=ratio,

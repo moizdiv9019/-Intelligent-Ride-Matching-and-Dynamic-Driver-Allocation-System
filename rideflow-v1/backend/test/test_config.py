@@ -24,6 +24,20 @@ def test_settings_defaults(monkeypatch):
         "ZONE_GRID_RESOLUTION_DEGREES",
         "ZONE_SHORTAGE_RATIO_THRESHOLD",
         "ZONE_SURPLUS_RATIO_THRESHOLD",
+        "DEMAND_FORECAST_HISTORY_DAYS",
+        "DEMAND_FORECAST_RANDOM_SEED",
+        "DEMAND_FORECAST_MAX_HOURS_AHEAD",
+        "DEMAND_SIMULATION_CENTER_LAT",
+        "DEMAND_SIMULATION_CENTER_LNG",
+        "SURGE_RATIO_THRESHOLD",
+        "SURGE_INCREMENT_PER_RATIO",
+        "SURGE_MAX_MULTIPLIER",
+        "POOLING_PICKUP_PROXIMITY_METERS",
+        "POOLING_DESTINATION_PROXIMITY_METERS",
+        "POOLING_MAX_DETOUR_PERCENT",
+        "POOLING_MAX_ADDITIONAL_DURATION_SECONDS",
+        "POOLING_MAX_PASSENGERS",
+        "POOLING_DEMO_DISCOUNT_PERCENT",
         "MATCHING_ETA_MAX_SECONDS",
         "MATCHING_DISTANCE_MAX_METERS",
         "MATCHING_IDLE_MAX_SECONDS",
@@ -57,6 +71,20 @@ def test_settings_defaults(monkeypatch):
     assert settings.zone_grid_resolution_degrees == 0.01
     assert settings.zone_shortage_ratio_threshold == 1.5
     assert settings.zone_surplus_ratio_threshold == 0.75
+    assert settings.demand_forecast_history_days == 90
+    assert settings.demand_forecast_random_seed == 42
+    assert settings.demand_forecast_max_hours_ahead == 6
+    assert settings.demand_simulation_center_lat == 12.2965
+    assert settings.demand_simulation_center_lng == 76.6405
+    assert settings.surge_ratio_threshold == 1.5
+    assert settings.surge_increment_per_ratio == 0.1
+    assert settings.surge_max_multiplier == 1.5
+    assert settings.pooling_pickup_proximity_meters == 2000
+    assert settings.pooling_destination_proximity_meters == 3000
+    assert settings.pooling_max_detour_percent == 30
+    assert settings.pooling_max_additional_duration_seconds == 600
+    assert settings.pooling_max_passengers == 2
+    assert settings.pooling_demo_discount_percent == 10
     assert settings.matching_eta_max_seconds == 1200
     assert settings.matching_distance_max_meters == 5000
     assert settings.matching_idle_max_seconds == 1800

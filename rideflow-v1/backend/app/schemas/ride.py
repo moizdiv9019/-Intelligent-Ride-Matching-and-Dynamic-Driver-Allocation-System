@@ -80,6 +80,47 @@ class RideCreateRequest(BaseModel):
     destination: Coordinate
     pickup_address: str = Field(min_length=1, max_length=500)
     destination_address: str = Field(min_length=1, max_length=500)
+    pooling_opt_in: bool = False
+
+
+class PoolingStop(BaseModel):
+    passenger_label: Literal["A", "B"]
+    stop_type: Literal["pickup", "dropoff"]
+    coordinate: Coordinate
+
+
+class PassengerPoolEstimate(BaseModel):
+    passenger_label: Literal["A", "B"]
+    individual_distance_m: float = Field(ge=0, allow_inf_nan=False)
+    individual_duration_s: float = Field(ge=0, allow_inf_nan=False)
+    individual_fare_estimate: float = Field(ge=0, allow_inf_nan=False)
+    pooled_distance_m: float = Field(ge=0, allow_inf_nan=False)
+    pooled_duration_s: float = Field(ge=0, allow_inf_nan=False)
+    detour_distance_m: float = Field(ge=0, allow_inf_nan=False)
+    detour_percent: float = Field(ge=0, allow_inf_nan=False)
+    additional_duration_s: float = Field(ge=0, allow_inf_nan=False)
+    pooled_fare_estimate: float = Field(ge=0, allow_inf_nan=False)
+
+
+class PoolingFareComparison(BaseModel):
+    estimates_only: Literal[True] = True
+    currency: Literal["INR"] = "INR"
+    discount_percent: float = Field(ge=0, le=100, allow_inf_nan=False)
+    total_separate_fare_estimate: float = Field(ge=0, allow_inf_nan=False)
+    pooled_base_fare_estimate: float = Field(ge=0, allow_inf_nan=False)
+    pooled_total_fare_estimate: float = Field(ge=0, allow_inf_nan=False)
+    estimated_total_passenger_savings: float
+    passenger_fares: list[PassengerPoolEstimate] = Field(min_length=2, max_length=2)
+
+
+class PoolingPreviewResponse(BaseModel):
+    pool_available: bool
+    explanation: str
+    optimized_stops: list[PoolingStop] = Field(default_factory=list)
+    route_geometry: GeoJSONLineString | None = None
+    pooled_distance_m: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    pooled_duration_s: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    fare_comparison: PoolingFareComparison | None = None
 
 
 class RideVehicleSummary(BaseModel):

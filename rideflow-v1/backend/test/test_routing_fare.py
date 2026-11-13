@@ -13,7 +13,10 @@ from app.main import app
 from app.schemas.location import Coordinate
 from app.schemas.ride import GeoJSONLineString, RoutingResult
 from app.services.fare_service import calculate_fare
-from app.services.routing_service import get_driving_route
+from app.services.routing_service import (
+    get_driving_route,
+    get_multi_stop_driving_routes,
+)
 
 
 class MockResult:
@@ -96,6 +99,96 @@ def sample_routing_response():
             ],
         },
     )
+
+
+def test_multi_stop_routing_requests_full_geometry_and_route_alternatives(
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "routing_base_url", "https://router.example/")
+    calls = {}
+    response = httpx.Response(
+        200,
+        json={
+            "code": "Ok",
+            "routes": [
+                {
+                    "distance": 9000,
+                    "duration": 900,
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [76.0, 12.0],
+                            [76.1, 12.1],
+                        ],
+                    },
+                    "legs": [
+                        {"distance": 3000, "duration": 300},
+                        {"distance": 6000, "duration": 600},
+                        {"distance": 0, "duration": 0},
+                    ],
+                },
+                {
+                    "distance": 8500,
+                    "duration": 800,
+                    "geometry": {
+                        "type": "LineString",
+                        "coordinates": [
+                            [76.0, 12.0],
+                            [76.1, 12.1],
+                        ],
+                    },
+                    "legs": [
+                        {"distance": 2500, "duration": 250},
+                        {"distance": 6000, "duration": 550},
+                        {"distance": 0, "duration": 0},
+                    ],
+                },
+            ],
+        },
+    )
+    install_routing_client(monkeypatch, response=response, calls=calls)
+
+    routes = asyncio.run(
+        get_multi_stop_driving_routes(
+            [
+                Coordinate(lat=12.0, lng=76.0),
+                Coordinate(lat=12.1, lng=76.1),
+                Coordinate(lat=12.2, lng=76.2),
+                Coordinate(lat=12.3, lng=76.3),
+            ]
+        )
+    )
+
+    assert len(routes) == 2
+    assert routes[0].duration_s == 900
+    assert len(routes[0].legs) == 3
+    assert routes[1].distance_m == 8500
+    assert calls["url"].endswith(
+        "76.0,12.0;76.1,12.1;76.2,12.2;76.3,12.3"
+    )
+    assert calls["params"] == {
+        "overview": "full",
+        "geometries": "geojson",
+        "alternatives": "true",
+        "steps": "false",
+    }
+
+
+def test_multi_stop_routing_maps_timeout_and_no_route_errors(monkeypatch):
+    monkeypatch.setattr(settings, "routing_base_url", "https://router.example")
+    stops = [Coordinate(lat=12.0, lng=76.0), Coordinate(lat=12.1, lng=76.1)]
+    install_routing_client(monkeypatch, error=httpx.TimeoutException("timed out"))
+    with pytest.raises(HTTPException) as timeout_info:
+        asyncio.run(get_multi_stop_driving_routes(stops))
+    assert timeout_info.value.status_code == 503
+
+    install_routing_client(
+        monkeypatch,
+        response=httpx.Response(200, json={"code": "NoRoute", "routes": []}),
+    )
+    with pytest.raises(HTTPException) as no_route_info:
+        asyncio.run(get_multi_stop_driving_routes(stops))
+    assert no_route_info.value.status_code == 422
 
 
 def test_routing_response_is_parsed_and_coordinates_use_longitude_first(

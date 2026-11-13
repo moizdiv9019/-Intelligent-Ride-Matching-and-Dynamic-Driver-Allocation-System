@@ -37,6 +37,28 @@ class Settings(BaseSettings):
     zone_surplus_ratio_threshold: float = Field(
         default=0.75, ge=0, allow_inf_nan=False
     )
+    demand_forecast_history_days: int = Field(default=90, ge=1)
+    demand_forecast_random_seed: int = 42
+    demand_forecast_max_hours_ahead: int = Field(default=6, ge=1, le=6)
+    demand_simulation_center_lat: float = Field(
+        default=12.2965, ge=-90, le=90, allow_inf_nan=False
+    )
+    demand_simulation_center_lng: float = Field(
+        default=76.6405, ge=-180, le=180, allow_inf_nan=False
+    )
+    surge_ratio_threshold: float = Field(default=1.5, gt=0, allow_inf_nan=False)
+    surge_increment_per_ratio: float = Field(
+        default=0.10, gt=0, allow_inf_nan=False
+    )
+    surge_max_multiplier: float = Field(default=1.5, ge=1, allow_inf_nan=False)
+    pooling_pickup_proximity_meters: int = Field(default=2000, gt=0)
+    pooling_destination_proximity_meters: int = Field(default=3000, gt=0)
+    pooling_max_detour_percent: float = Field(default=30.0, ge=0, allow_inf_nan=False)
+    pooling_max_additional_duration_seconds: int = Field(default=600, ge=0)
+    pooling_max_passengers: int = Field(default=2, ge=2, le=10)
+    pooling_demo_discount_percent: float = Field(
+        default=10.0, ge=0, le=100, allow_inf_nan=False
+    )
     matching_eta_max_seconds: float = Field(
         default=1200.0, gt=0, allow_inf_nan=False
     )
@@ -75,6 +97,10 @@ class Settings(BaseSettings):
         )
         if not isclose(total, 1.0, abs_tol=1e-6):
             raise ValueError("Driver matching weights must sum to 1.")
+        return self
+
+    @model_validator(mode="after")
+    def validate_zone_ratio_thresholds(self) -> "Settings":
         if self.zone_surplus_ratio_threshold >= self.zone_shortage_ratio_threshold:
             raise ValueError(
                 "Zone surplus ratio threshold must be lower than the shortage threshold."
